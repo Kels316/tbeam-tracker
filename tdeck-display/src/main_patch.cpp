@@ -25,8 +25,9 @@
 
 // ── NOTHING ELSE needs to change ─────────────────────────────
 // TrackerDisplayModule registers itself with the screen system
-// automatically via the SinglePortModule base class.
-// The two extra pages will appear in the normal T-Deck screen
-// cycle alongside all built-in Meshtastic screens.
-// Navigate between pages using the existing T-Deck screen
-// controls (trackball click or keyboard).
+// via the SinglePortModule base class. Two extra pages appear
+// in the normal T-Deck screen cycle alongside all built-in
+// Meshtastic screens.
+//
+// Page 1 — Radar view (track-up compass rose, bearing, distance)
+// Page 2 — Data view  (full numeric readout)

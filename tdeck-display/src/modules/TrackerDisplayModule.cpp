@@ -1,31 +1,32 @@
 #include "TrackerDisplayModule.h"
+#include "GPS.h"
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "channels.h"
 #include "configuration.h"
 #include "graphics/Screen.h"
-#include "mesh/generated/meshtastic/mesh.pb.h"
-#include "mesh/generated/meshtastic/telemetry.pb.h"
 #include <Arduino.h>
 #include <math.h>
 #include <pb_decode.h>
 
 TrackerDisplayModule *trackerDisplayModule;
 
+static constexpr float DEG2RAD  = M_PI / 180.0f;
+static constexpr float RAD2DEG  = 180.0f / M_PI;
+static constexpr float MPS_TO_KN = 1.94384f; // metres/sec to knots
+
 // ── Constructor ───────────────────────────────────────────────
 TrackerDisplayModule::TrackerDisplayModule()
     : SinglePortModule("TrackerDisplay", meshtastic_PortNum_POSITION_APP)
 {
-    LOG_INFO("TrackerDisplayModule: initialised, listening on POSITION_APP\n");
+    LOG_INFO("TrackerDisplayModule: initialised, 10min SAR window\n");
 }
 
 // ── Packet handler ────────────────────────────────────────────
 ProcessMessage TrackerDisplayModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    // Only process packets from channel 0 (our private TRACKER channel)
     if (mp.channel != 0) return ProcessMessage::CONTINUE;
 
-    // Decode the position protobuf
     meshtastic_Position pos = meshtastic_Position_init_default;
     pb_istream_t stream = pb_istream_from_buffer(
         mp.decoded.payload.bytes, mp.decoded.payload.size);
@@ -35,7 +36,6 @@ ProcessMessage TrackerDisplayModule::handleReceived(const meshtastic_MeshPacket 
         return ProcessMessage::CONTINUE;
     }
 
-    // Store the data
     tracker.latitude_i   = pos.latitude_i;
     tracker.longitude_i  = pos.longitude_i;
     tracker.altitude     = pos.altitude;
@@ -48,99 +48,198 @@ ProcessMessage TrackerDisplayModule::handleReceived(const meshtastic_MeshPacket 
     tracker.node_id      = mp.from;
     tracker.valid        = true;
 
-    LOG_INFO("TrackerDisplayModule: position updated from node 0x%08x "
-             "lat=%d lon=%d track=%u\n",
-             mp.from, pos.latitude_i, pos.longitude_i, pos.ground_track);
+    updateHistory(pos.latitude_i, pos.longitude_i, millis());
 
-    // Request screen refresh
-    if (screen)
-        screen->forceDisplay();
+    LOG_INFO("TrackerDisplayModule: fix lat=%d lon=%d spd=%.2fkn cog=%.0f win=%u/20\n",
+             pos.latitude_i, pos.longitude_i,
+             tracker.speed_kn, tracker.cog_deg, tracker.window_fills);
 
+    if (screen) screen->forceDisplay();
     return ProcessMessage::CONTINUE;
 }
 
-// ── Frame dispatcher ──────────────────────────────────────────
-// Meshtastic calls drawFrame for each of our registered pages.
-// currentPage is set by the frame index passed via state->currentFrame
-// mapped against getNumExtraFrames().
-void TrackerDisplayModule::drawFrame(OLEDDisplay *display,
-                                     OLEDDisplayUiState *state,
-                                     int16_t x, int16_t y)
+// ── 10-minute history + SAR speed/COG ────────────────────────
+//
+// Mirrors the buoy_map.py approach:
+//   - Discard intervals where movement < MIN_MOVE_METRES (GPS drift)
+//   - Speed = total valid distance / total elapsed time (Bowditch)
+//   - COG   = bearing from oldest fix to newest fix (net drift direction)
+//
+void TrackerDisplayModule::updateHistory(int32_t lat_i, int32_t lon_i,
+                                          uint32_t rx_ms)
 {
-    // Determine which of our two pages we are drawing.
-    // Meshtastic passes the global frame index; we track which page
-    // we're on by checking if we've been called an even or odd number
-    // of times within the frame cycle — simplest approach is to store
-    // currentPage and toggle it based on the frame index parity.
-    currentPage = (state->currentFrame % 2);
+    // Write new fix into ring buffer
+    history[histHead] = { lat_i, lon_i, rx_ms, true };
+    histHead = (histHead + 1) % HISTORY_SIZE;
+    if (histCount < HISTORY_SIZE) histCount++;
 
-    if (currentPage == 0)
-        drawMapPage(display, state, x, y);
-    else
-        drawDataPage(display, state, x, y);
+    tracker.window_fills = histCount;
+
+    if (histCount < 2) {
+        tracker.motion_valid = false;
+        return;
+    }
+
+    // Walk buffer chronologically
+    uint8_t oldest = (histHead - histCount + HISTORY_SIZE) % HISTORY_SIZE;
+    uint8_t newest = (histHead - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+
+    // ── COG: bearing from oldest to newest fix (net drift) ───
+    float latOld = history[oldest].latitude_i  / 1e7f;
+    float lonOld = history[oldest].longitude_i / 1e7f;
+    float latNew = history[newest].latitude_i  / 1e7f;
+    float lonNew = history[newest].longitude_i / 1e7f;
+    tracker.cog_deg = bearingTo(latOld, lonOld, latNew, lonNew);
+
+    // ── Speed: total valid distance / total valid time ───────
+    // Only count intervals where movement >= MIN_MOVE_METRES
+    // to mirror the GPS drift filter in buoy_map.py
+    float totalDistM = 0.0f;
+    float totalTimeSec = 0.0f;
+
+    for (uint8_t i = 0; i < histCount - 1; i++) {
+        uint8_t idxA = (oldest + i)     % HISTORY_SIZE;
+        uint8_t idxB = (oldest + i + 1) % HISTORY_SIZE;
+
+        if (!history[idxA].valid || !history[idxB].valid) continue;
+
+        float latA = history[idxA].latitude_i  / 1e7f;
+        float lonA = history[idxA].longitude_i / 1e7f;
+        float latB = history[idxB].latitude_i  / 1e7f;
+        float lonB = history[idxB].longitude_i / 1e7f;
+
+        float distM = distanceMetres(latA, lonA, latB, lonB);
+        float dtSec = (float)(history[idxB].rx_ms - history[idxA].rx_ms) / 1000.0f;
+
+        // Skip GPS drift (same filter as buoy_map.py MIN_MOVE_METRES)
+        if (distM < MIN_MOVE_METRES) continue;
+        if (dtSec < 1.0f) continue;
+
+        totalDistM   += distM;
+        totalTimeSec += dtSec;
+    }
+
+    if (totalTimeSec > 0.0f) {
+        tracker.speed_kn     = (totalDistM / totalTimeSec) * MPS_TO_KN;
+        tracker.motion_valid = true;
+    } else {
+        // All intervals were sub-threshold — buoy is stationary
+        tracker.speed_kn     = 0.0f;
+        tracker.motion_valid = true; // still valid, just not moving
+    }
 }
 
-// ── Map page ──────────────────────────────────────────────────
-void TrackerDisplayModule::drawMapPage(OLEDDisplay *display,
-                                       OLEDDisplayUiState *state,
-                                       int16_t x, int16_t y)
+// ── Frame dispatcher ──────────────────────────────────────────
+void TrackerDisplayModule::drawFrame(OLEDDisplay *display,
+                                      OLEDDisplayUiState *state,
+                                      int16_t x, int16_t y)
+{
+    int page = state->currentFrame % 2;
+    if (page == 0) drawRadarPage(display, state, x, y);
+    else           drawDataPage(display, state, x, y);
+}
+
+// ── Radar page ────────────────────────────────────────────────
+void TrackerDisplayModule::drawRadarPage(OLEDDisplay *display,
+                                          OLEDDisplayUiState *state,
+                                          int16_t x, int16_t y)
 {
     display->clear();
     display->setFont(ArialMT_Plain_10);
 
-    // Header bar
-    display->setTextAlignment(TEXT_ALIGN_CENTER);
-    display->drawString(x + 64, y + 0, "TRACKER — Map");
-    display->drawLine(x + 0, y + 12, x + 128, y + 12);
-
-    if (!tracker.valid) {
-        display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(x + 64, y + 30, "Waiting for");
-        display->drawString(x + 64, y + 42, "tracker packet...");
-        return;
+    bool ownFix = false;
+    float ownLat = 0, ownLon = 0, ownHeading = 0;
+    if (gps && gps->hasLock()) {
+        ownLat     = gps->latitude  / 1e7f;
+        ownLon     = gps->longitude / 1e7f;
+        ownHeading = gps->heading   / 100.0f;
+        ownFix     = true;
     }
 
-    // Map area: 128x40 pixels below the header
-    const int16_t mapX = x + 4;
-    const int16_t mapY = y + 15;
-    const int16_t mapW = 120;
-    const int16_t mapH = 38;
+    const int16_t cx = x + 52;
+    const int16_t cy = y + 38;
+    const int16_t rOuter = 32;
+    const int16_t rInner = 28;
 
-    display->drawRect(mapX, mapY, mapW, mapH);
+    float rotation = ownFix ? ownHeading : 0.0f;
+    drawCompassRose(display, cx, cy, rOuter, rotation);
+    drawBoatIcon(display, cx, cy);
 
-    // Draw crosshair centre dot (tracker position — fixed centre for now)
-    const int16_t cx = mapX + mapW / 2;
-    const int16_t cy = mapY + mapH / 2;
-    display->fillCircle(cx, cy, 3);
+    if (tracker.valid && ownFix) {
+        float buoyLat = tracker.latitude_i  / 1e7f;
+        float buoyLon = tracker.longitude_i / 1e7f;
 
-    // Draw heading arrow
-    float headingDeg = (float)(tracker.ground_track) / 100.0f;
-    drawArrow(display, cx, cy, 12, headingDeg);
+        float distM   = distanceMetres(ownLat, ownLon, buoyLat, buoyLon);
+        float bearDeg = bearingTo(ownLat, ownLon, buoyLat, buoyLon);
+        float relBear = bearDeg - rotation;
 
-    // Coordinates below map
+        float plotRad = (relBear - 90.0f) * DEG2RAD;
+        int16_t bx = cx + (int16_t)(rInner * cosf(plotRad));
+        int16_t by = cy + (int16_t)(rInner * sinf(plotRad));
+
+        display->fillCircle(bx, by, 3);
+        display->drawLine(cx, cy, bx, by);
+
+        float buoyRelHead = (tracker.ground_track / 100.0f) - rotation;
+        drawArrow(display, bx, by, 5, buoyRelHead);
+
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->setFont(ArialMT_Plain_16);
+        display->drawString(x + 90, y + 8, formatDistance(distM));
+        display->setFont(ArialMT_Plain_10);
+
+        char buf[20];
+        snprintf(buf, sizeof(buf), "Brg %03.0f%cTrue", bearDeg, (char)176);
+        display->drawString(x + 90, y + 28, buf);
+
+        snprintf(buf, sizeof(buf), "Hdg %03.0f%cMag",
+                 tracker.ground_track / 100.0f, (char)176);
+        display->drawString(x + 90, y + 40, buf);
+
+        // Speed on radar page too
+        if (tracker.motion_valid) {
+            snprintf(buf, sizeof(buf), "Spd %.1fkn", tracker.speed_kn);
+            display->drawString(x + 90, y + 52, buf);
+        }
+
+        display->setTextAlignment(TEXT_ALIGN_RIGHT);
+        display->drawString(x + 126, y + 64, formatAge(millis()));
+
+    } else if (tracker.valid && !ownFix) {
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->setFont(ArialMT_Plain_10);
+        display->drawString(x + 90, y + 10, "No own GPS");
+        char latBuf[20], lonBuf[20];
+        snprintf(latBuf, sizeof(latBuf), "%.4f", tracker.latitude_i / 1e7f);
+        snprintf(lonBuf, sizeof(lonBuf), "%.4f", tracker.longitude_i / 1e7f);
+        display->drawString(x + 90, y + 24, latBuf);
+        display->drawString(x + 90, y + 36, lonBuf);
+        display->drawString(x + 90, y + 48, formatAge(millis()));
+    } else {
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(x + 64, y + 36, "No buoy signal");
+    }
+
+    if (ownFix) {
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_RIGHT);
+        char hdgBuf[12];
+        snprintf(hdgBuf, sizeof(hdgBuf), "%03.0f%cM", ownHeading, (char)176);
+        display->drawString(x + 126, y + 0, hdgBuf);
+    }
+
+    display->setFont(ArialMT_Plain_10);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
-    char latBuf[24], lonBuf[24];
-    float lat = tracker.latitude_i / 1e7f;
-    float lon = tracker.longitude_i / 1e7f;
-    snprintf(latBuf, sizeof(latBuf), "Lat: %.5f", lat);
-    snprintf(lonBuf, sizeof(lonBuf), "Lon: %.5f", lon);
-    display->drawString(x + 2, y + 54, latBuf);
-    display->drawString(x + 2, y + 64, lonBuf);
-
-    // Age top right
-    display->setTextAlignment(TEXT_ALIGN_RIGHT);
-    display->drawString(x + 126, y + 54, formatAge(millis()));
+    display->drawString(x + 2, y + 0, "TRACKER");
 }
 
 // ── Data page ─────────────────────────────────────────────────
 void TrackerDisplayModule::drawDataPage(OLEDDisplay *display,
-                                        OLEDDisplayUiState *state,
-                                        int16_t x, int16_t y)
+                                         OLEDDisplayUiState *state,
+                                         int16_t x, int16_t y)
 {
     display->clear();
     display->setFont(ArialMT_Plain_10);
-    display->setTextAlignment(TEXT_ALIGN_LEFT);
-
     display->setTextAlignment(TEXT_ALIGN_CENTER);
     display->drawString(x + 64, y + 0, "TRACKER — Data");
     display->drawLine(x + 0, y + 12, x + 128, y + 12);
@@ -153,82 +252,159 @@ void TrackerDisplayModule::drawDataPage(OLEDDisplay *display,
 
     display->setTextAlignment(TEXT_ALIGN_LEFT);
 
-    float lat     = tracker.latitude_i / 1e7f;
-    float lon     = tracker.longitude_i / 1e7f;
-    float heading = tracker.ground_track / 100.0f;
-    float pdop    = tracker.PDOP / 100.0f;
+    float lat        = tracker.latitude_i  / 1e7f;
+    float lon        = tracker.longitude_i / 1e7f;
+    float compassHdg = tracker.ground_track / 100.0f;
+    float pdop       = tracker.PDOP / 100.0f;
 
     char buf[48];
-    int row = y + 15;
     const int rowH = 11;
+    int rowL = y + 15; // left column y
+    int rowR = y + 15; // right column y
 
-    snprintf(buf, sizeof(buf), "Lat:  %.5f", lat);
-    display->drawString(x + 2, row, buf); row += rowH;
+    // ── Left column ───────────────────────────────────────────
+    snprintf(buf, sizeof(buf), "Lat: %.5f", lat);
+    display->drawString(x + 2, rowL, buf); rowL += rowH;
 
-    snprintf(buf, sizeof(buf), "Lon:  %.5f", lon);
-    display->drawString(x + 2, row, buf); row += rowH;
+    snprintf(buf, sizeof(buf), "Lon: %.5f", lon);
+    display->drawString(x + 2, rowL, buf); rowL += rowH;
 
-    snprintf(buf, sizeof(buf), "Alt:  %dm", (int)tracker.altitude);
-    display->drawString(x + 2, row, buf);
+    snprintf(buf, sizeof(buf), "Alt: %dm", (int)tracker.altitude);
+    display->drawString(x + 2, rowL, buf); rowL += rowH;
 
-    // Right column
-    row = y + 15;
-    snprintf(buf, sizeof(buf), "Hdg:%.1f", heading);
+    // Speed — show 0.0 if stationary, --- if no data yet
+    if (tracker.motion_valid)
+        snprintf(buf, sizeof(buf), "Spd: %.1fkn", tracker.speed_kn);
+    else
+        snprintf(buf, sizeof(buf), "Spd: ---");
+    display->drawString(x + 2, rowL, buf); rowL += rowH;
+
+    // COG — net drift bearing over 10-min window
+    if (tracker.motion_valid)
+        snprintf(buf, sizeof(buf), "COG: %.0f%cT", tracker.cog_deg, (char)176);
+    else
+        snprintf(buf, sizeof(buf), "COG: --- T");
+    display->drawString(x + 2, rowL, buf);
+
+    // ── Right column ──────────────────────────────────────────
     display->setTextAlignment(TEXT_ALIGN_RIGHT);
-    display->drawString(x + 126, row, buf); row += rowH;
+
+    snprintf(buf, sizeof(buf), "Hdg:%.0fM", compassHdg);
+    display->drawString(x + 126, rowR, buf); rowR += rowH;
 
     snprintf(buf, sizeof(buf), "Sats:%u", (unsigned)tracker.sats_in_view);
-    display->drawString(x + 126, row, buf); row += rowH;
+    display->drawString(x + 126, rowR, buf); rowR += rowH;
 
     snprintf(buf, sizeof(buf), "PDOP:%.1f", pdop);
-    display->drawString(x + 126, row, buf); row += rowH;
+    display->drawString(x + 126, rowR, buf); rowR += rowH;
 
-    // Bottom row: RSSI and age
-    display->setTextAlignment(TEXT_ALIGN_LEFT);
     snprintf(buf, sizeof(buf), "RSSI:%ddBm", (int)tracker.rssi);
-    display->drawString(x + 2, row, buf);
+    display->drawString(x + 126, rowR, buf); rowR += rowH;
 
-    display->setTextAlignment(TEXT_ALIGN_RIGHT);
-    display->drawString(x + 126, row, formatAge(millis()));
+    // Window fill indicator — shows SAR data maturity
+    // e.g. "Win: 8/20" means 4 of 10 minutes accumulated
+    snprintf(buf, sizeof(buf), "Win:%u/20", tracker.window_fills);
+    display->drawString(x + 126, rowR, buf);
+
+    // Age bottom left
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+    display->drawString(x + 2, y + 64, formatAge(millis()));
+}
+
+// ── Compass rose ──────────────────────────────────────────────
+void TrackerDisplayModule::drawCompassRose(OLEDDisplay *display,
+                                            int16_t cx, int16_t cy,
+                                            int16_t r, float rotationDeg)
+{
+    display->drawCircle(cx, cy, r);
+    display->drawCircle(cx, cy, r - 4);
+
+    const char *cardinals[] = { "N", "E", "S", "W" };
+    for (int i = 0; i < 4; i++) {
+        float angleRad = ((float)(i * 90) - rotationDeg - 90.0f) * DEG2RAD;
+        int16_t lx = cx + (int16_t)((r - 9) * cosf(angleRad));
+        int16_t ly = cy + (int16_t)((r - 9) * sinf(angleRad));
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->setFont(ArialMT_Plain_10);
+        display->drawString(lx, ly - 4, cardinals[i]);
+    }
+    for (int i = 0; i < 8; i++) {
+        float angleRad = ((float)(i * 45) - rotationDeg - 90.0f) * DEG2RAD;
+        int16_t x1 = cx + (int16_t)((r - 4) * cosf(angleRad));
+        int16_t y1 = cy + (int16_t)((r - 4) * sinf(angleRad));
+        int16_t x2 = cx + (int16_t)(r * cosf(angleRad));
+        int16_t y2 = cy + (int16_t)(r * sinf(angleRad));
+        display->drawLine(x1, y1, x2, y2);
+    }
+}
+
+// ── Boat icon ─────────────────────────────────────────────────
+void TrackerDisplayModule::drawBoatIcon(OLEDDisplay *display,
+                                         int16_t cx, int16_t cy)
+{
+    display->drawLine(cx,     cy - 4, cx - 3, cy + 3);
+    display->drawLine(cx,     cy - 4, cx + 3, cy + 3);
+    display->drawLine(cx - 3, cy + 3, cx + 3, cy + 3);
 }
 
 // ── Heading arrow ─────────────────────────────────────────────
-// Draws a simple arrow centred at (cx,cy) pointing in angleDeg
-// (0 = north = up, clockwise positive)
 void TrackerDisplayModule::drawArrow(OLEDDisplay *display,
-                                     int16_t cx, int16_t cy,
-                                     int16_t r, float angleDeg)
+                                      int16_t cx, int16_t cy,
+                                      int16_t r, float angleDeg)
 {
-    // Convert to screen angle: 0 = up, clockwise
-    float rad = (angleDeg - 90.0f) * (M_PI / 180.0f);
-
-    // Arrow tip
+    float rad = (angleDeg - 90.0f) * DEG2RAD;
     int16_t tx = cx + (int16_t)(r * cosf(rad));
     int16_t ty = cy + (int16_t)(r * sinf(rad));
-
-    // Arrow tail
     int16_t bx = cx - (int16_t)((r * 0.6f) * cosf(rad));
     int16_t by = cy - (int16_t)((r * 0.6f) * sinf(rad));
-
-    // Arrow head wings
-    float wingRad = rad + M_PI * 0.8f;
-    int16_t w1x = tx + (int16_t)(5 * cosf(wingRad));
-    int16_t w1y = ty + (int16_t)(5 * sinf(wingRad));
-    float wingRad2 = rad - M_PI * 0.8f;
-    int16_t w2x = tx + (int16_t)(5 * cosf(wingRad2));
-    int16_t w2y = ty + (int16_t)(5 * sinf(wingRad2));
-
+    float w1r = rad + M_PI * 0.75f;
+    float w2r = rad - M_PI * 0.75f;
     display->drawLine(bx, by, tx, ty);
-    display->drawLine(tx, ty, w1x, w1y);
-    display->drawLine(tx, ty, w2x, w2y);
+    display->drawLine(tx, ty, tx + (int16_t)(3*cosf(w1r)), ty + (int16_t)(3*sinf(w1r)));
+    display->drawLine(tx, ty, tx + (int16_t)(3*cosf(w2r)), ty + (int16_t)(3*sinf(w2r)));
+}
+
+// ── Haversine ─────────────────────────────────────────────────
+float TrackerDisplayModule::distanceMetres(float lat1, float lon1,
+                                            float lat2, float lon2)
+{
+    const float R = 6371000.0f;
+    float dLat = (lat2 - lat1) * DEG2RAD;
+    float dLon = (lon2 - lon1) * DEG2RAD;
+    float a = sinf(dLat/2)*sinf(dLat/2) +
+              cosf(lat1*DEG2RAD)*cosf(lat2*DEG2RAD)*
+              sinf(dLon/2)*sinf(dLon/2);
+    return R * 2.0f * atan2f(sqrtf(a), sqrtf(1.0f - a));
+}
+
+// ── True bearing ──────────────────────────────────────────────
+float TrackerDisplayModule::bearingTo(float lat1, float lon1,
+                                       float lat2, float lon2)
+{
+    float dLon = (lon2 - lon1) * DEG2RAD;
+    float y = sinf(dLon) * cosf(lat2 * DEG2RAD);
+    float x = cosf(lat1*DEG2RAD)*sinf(lat2*DEG2RAD) -
+               sinf(lat1*DEG2RAD)*cosf(lat2*DEG2RAD)*cosf(dLon);
+    return fmodf(atan2f(y, x) * RAD2DEG + 360.0f, 360.0f);
+}
+
+// ── Distance formatter ────────────────────────────────────────
+String TrackerDisplayModule::formatDistance(float metres)
+{
+    char buf[16];
+    if (metres < 1852.0f)
+        snprintf(buf, sizeof(buf), "%dm", (int)metres);
+    else if (metres / 1852.0f < 10.0f)
+        snprintf(buf, sizeof(buf), "%.2fnm", metres / 1852.0f);
+    else
+        snprintf(buf, sizeof(buf), "%.1fnm", metres / 1852.0f);
+    return String(buf);
 }
 
 // ── Age formatter ─────────────────────────────────────────────
 String TrackerDisplayModule::formatAge(uint32_t now_ms)
 {
-    if (!tracker.valid || tracker.last_rx_ms == 0)
-        return "--";
-
+    if (!tracker.valid || tracker.last_rx_ms == 0) return "--";
     uint32_t age_s = (now_ms - tracker.last_rx_ms) / 1000;
     char buf[12];
     if (age_s < 60)
