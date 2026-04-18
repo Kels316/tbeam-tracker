@@ -20,6 +20,133 @@
 
 ## Hardware — Wiring
 
+### Wiring diagrams
+
+**Diagram 1 — system overview**
+
+<details>
+<summary>Click to view system overview diagram</summary>
+
+```svg
+<svg width="100%" viewBox="0 0 680 560" role="img">
+  <title>T-Beam system overview wiring diagram</title>
+  <desc>Overview showing connections between M8Q-5883 GPS module, T-Beam, LEDs and strobe</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="265" y="80" width="150" height="400" rx="12" fill="#f1efe8" stroke="#5f5e5a" stroke-width="1"/>
+  <text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="106" text-anchor="middle" fill="#2c2c2a">TTGO T-Beam</text>
+  <text font-family="sans-serif" font-size="11" x="340" y="122" text-anchor="middle" fill="#5f5e5a">ESP32 + LoRa</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="175" fill="#2c2c2a">GPIO 12</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="215" fill="#2c2c2a">GPIO 15</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="255" fill="#2c2c2a">GPIO 21</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="295" fill="#2c2c2a">GPIO 22</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="335" fill="#2c2c2a">3.3V</text>
+  <text font-family="sans-serif" font-size="11" x="275" y="395" fill="#2c2c2a">GND</text>
+  <text font-family="sans-serif" font-size="11" x="405" y="175" text-anchor="end" fill="#2c2c2a">GPIO 2</text>
+  <text font-family="sans-serif" font-size="11" x="405" y="255" text-anchor="end" fill="#2c2c2a">GPIO 4</text>
+  <text font-family="sans-serif" font-size="11" x="405" y="335" text-anchor="end" fill="#2c2c2a">GPIO 13</text>
+  <text font-family="sans-serif" font-size="11" x="405" y="360" text-anchor="end" fill="#2c2c2a">5V</text>
+  <text font-family="sans-serif" font-size="11" x="405" y="395" text-anchor="end" fill="#2c2c2a">GND</text>
+  <circle cx="265" cy="175" r="5" fill="#378add"/>
+  <circle cx="265" cy="215" r="5" fill="#378add"/>
+  <circle cx="265" cy="255" r="5" fill="#1d9e75"/>
+  <circle cx="265" cy="295" r="5" fill="#1d9e75"/>
+  <circle cx="265" cy="335" r="5" fill="#e24b4a"/>
+  <circle cx="265" cy="395" r="5" fill="#5f5e5a"/>
+  <circle cx="415" cy="175" r="5" fill="#e24b4a"/>
+  <circle cx="415" cy="255" r="5" fill="#ba7517"/>
+  <circle cx="415" cy="335" r="5" fill="#ba7517"/>
+  <circle cx="415" cy="360" r="5" fill="#e24b4a"/>
+  <circle cx="415" cy="395" r="5" fill="#5f5e5a"/>
+  <rect x="30" y="155" width="150" height="220" rx="10" fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+  <text font-family="sans-serif" font-size="13" font-weight="500" x="105" y="181" text-anchor="middle" fill="#085041">M8Q-5883</text>
+  <text font-family="sans-serif" font-size="11" x="105" y="197" text-anchor="middle" fill="#0f6e56">GPS + compass</text>
+  <circle cx="180" cy="218" r="4" fill="#e24b4a"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="222" text-anchor="end" fill="#2c2c2a">3.3V</text>
+  <circle cx="180" cy="248" r="4" fill="#378add"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="252" text-anchor="end" fill="#2c2c2a">TX</text>
+  <circle cx="180" cy="278" r="4" fill="#378add"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="282" text-anchor="end" fill="#2c2c2a">RX</text>
+  <circle cx="180" cy="308" r="4" fill="#1d9e75"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="312" text-anchor="end" fill="#2c2c2a">SDA</text>
+  <circle cx="180" cy="338" r="4" fill="#1d9e75"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="342" text-anchor="end" fill="#2c2c2a">SCL</text>
+  <circle cx="180" cy="368" r="4" fill="#5f5e5a"/>
+  <text font-family="sans-serif" font-size="11" x="174" y="372" text-anchor="end" fill="#2c2c2a">GND</text>
+  <polyline fill="none" stroke="#e24b4a" stroke-width="1.5" points="180,218 193,218 193,110 248,110 248,335 265,335"/>
+  <polyline fill="none" stroke="#378add" stroke-width="1.5" points="180,248 205,248 205,175 265,175"/>
+  <polyline fill="none" stroke="#378add" stroke-width="1.5" stroke-dasharray="6 3" points="180,278 210,278 210,215 265,215"/>
+  <polyline fill="none" stroke="#1d9e75" stroke-width="1.5" points="180,308 215,308 215,255 265,255"/>
+  <polyline fill="none" stroke="#1d9e75" stroke-width="1.5" stroke-dasharray="6 3" points="180,338 220,338 220,295 265,295"/>
+  <polyline fill="none" stroke="#5f5e5a" stroke-width="1.5" points="180,368 193,368 193,450 248,450 248,395 265,395"/>
+  <polyline fill="none" stroke="#e24b4a" stroke-width="1.5" points="415,175 490,175"/>
+  <polyline fill="none" stroke="#ba7517" stroke-width="1.5" points="415,255 490,255"/>
+  <polyline fill="none" stroke="#ba7517" stroke-width="1.5" points="415,335 450,335 450,390 490,390"/>
+  <polyline fill="none" stroke="#e24b4a" stroke-width="1.5" stroke-dasharray="4 3" points="415,360 455,360 455,410 490,410"/>
+  <polyline fill="none" stroke="#5f5e5a" stroke-width="1.5" stroke-dasharray="4 3" points="415,395 460,395 460,430 490,430"/>
+  <rect x="490" y="148" width="160" height="65" rx="10" fill="#faece7" stroke="#993c1d" stroke-width="1"/>
+  <text font-family="sans-serif" font-size="13" font-weight="500" x="570" y="171" text-anchor="middle" fill="#4a1b0c">Power LED</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="187" text-anchor="middle" fill="#712b13">Always on — GPIO 2</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="203" text-anchor="middle" fill="#712b13">See circuit A</text>
+  <rect x="490" y="228" width="160" height="65" rx="10" fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+  <text font-family="sans-serif" font-size="13" font-weight="500" x="570" y="251" text-anchor="middle" fill="#412402">TX LED</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="267" text-anchor="middle" fill="#633806">Flashes on send — GPIO 4</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="283" text-anchor="middle" fill="#633806">See circuit A</text>
+  <rect x="490" y="368" width="160" height="100" rx="10" fill="#eeedfe" stroke="#534ab7" stroke-width="1"/>
+  <text font-family="sans-serif" font-size="13" font-weight="500" x="570" y="393" text-anchor="middle" fill="#26215c">Recovery strobe</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="411" text-anchor="middle" fill="#3c3489">GPIO 13 gate</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="429" text-anchor="middle" fill="#3c3489">5V LED + MOSFET</text>
+  <text font-family="sans-serif" font-size="11" x="570" y="447" text-anchor="middle" fill="#3c3489">See circuit B</text>
+  <rect x="30" y="500" width="620" height="50" rx="8" fill="none" stroke="#b4b2a9" stroke-width="0.5"/>
+  <line x1="50" y1="516" x2="86" y2="516" stroke="#378add" stroke-width="2"/>
+  <text font-family="sans-serif" font-size="11" x="92" y="520" fill="#2c2c2a">UART TX</text>
+  <line x1="50" y1="536" x2="86" y2="536" stroke="#378add" stroke-width="2" stroke-dasharray="6 3"/>
+  <text font-family="sans-serif" font-size="11" x="92" y="540" fill="#2c2c2a">UART RX</text>
+  <line x1="185" y1="516" x2="221" y2="516" stroke="#1d9e75" stroke-width="2"/>
+  <text font-family="sans-serif" font-size="11" x="227" y="520" fill="#2c2c2a">I2C SDA</text>
+  <line x1="185" y1="536" x2="221" y2="536" stroke="#1d9e75" stroke-width="2" stroke-dasharray="6 3"/>
+  <text font-family="sans-serif" font-size="11" x="227" y="540" fill="#2c2c2a">I2C SCL</text>
+  <line x1="330" y1="516" x2="366" y2="516" stroke="#e24b4a" stroke-width="2"/>
+  <text font-family="sans-serif" font-size="11" x="372" y="520" fill="#2c2c2a">Power</text>
+  <line x1="330" y1="536" x2="366" y2="536" stroke="#5f5e5a" stroke-width="2"/>
+  <text font-family="sans-serif" font-size="11" x="372" y="540" fill="#2c2c2a">Ground</text>
+  <line x1="450" y1="516" x2="486" y2="516" stroke="#ba7517" stroke-width="2"/>
+  <text font-family="sans-serif" font-size="11" x="492" y="520" fill="#2c2c2a">GPIO signal</text>
+  <line x1="450" y1="536" x2="486" y2="536" stroke="#ba7517" stroke-width="2" stroke-dasharray="4 3"/>
+  <text font-family="sans-serif" font-size="11" x="492" y="540" fill="#2c2c2a">GPIO shared run</text>
+</svg>
+```
+
+</details>
+
+**Circuit A — power LED and TX LED (same wiring for both)**
+
+```
+GPIO pin ──[220Ω resistor]──── LED anode  (longer leg +)
+                               LED cathode (shorter leg -) ──── GND
+
+Power LED: GPIO 2  (always on)
+TX LED:    GPIO 4  (flashes 200ms per packet sent)
+```
+
+**Circuit B — recovery strobe (5V via 2N7000 MOSFET)**
+
+```
+5V ──── LED anode (+)
+        LED cathode (-) ──[56Ω]──── 2N7000 Drain
+                                    2N7000 Source ──── GND
+
+GPIO 13 ──[100Ω]──┬──── 2N7000 Gate
+                  │
+               [10kΩ]
+                  │
+                 GND   (pulldown — do not skip)
+```
+
+
 ### M8Q-5883 module connections
 
 | Module pin | T-Beam pin | Purpose |
