@@ -1,29 +1,33 @@
 # Meshtastic Tracker Display — T-Deck Module
 
-Adds two extra screen pages to the LilyGo T-Deck showing live data
-from the tbeam-tracker GPS node over the private TRACKER channel.
-
-All standard T-Deck Meshtastic functionality is preserved — these
-are additional pages in the existing screen cycle, not a replacement.
+Adds two extra screen pages to the LilyGo T-Deck for recovering
+the tbeam-tracker GPS buoy at sea. All standard T-Deck Meshtastic
+functionality is preserved.
 
 ---
 
 ## What it adds
 
-| Page | Content |
-|---|---|
-| Map view | Position dot with heading arrow, coordinates, time since last packet |
-| Data view | Lat, lon, altitude, heading, satellites, PDOP, RSSI, time since last packet |
+### Page 1 — Radar view
+- Track-up compass rose (your heading always at top)
+- Your vessel at centre
+- Tracker buoy plotted at correct relative bearing on the rose
+- Small arrow on buoy showing which way it is pointing
+- Distance in metres (under 1nm) or nautical miles
+- Bearing to buoy in degrees true
+- Buoy heading in degrees true
+- Time since last packet
+- Falls back to north-up if T-Deck has no GPS fix
 
-Navigate to these pages using the T-Deck trackball click or keyboard,
-the same way you navigate any other Meshtastic screen.
+### Page 2 — Data view
+Full numeric readout: lat, lon, altitude, heading, satellites, PDOP, RSSI, time since last packet.
 
 ---
 
 ## Requirements
 
 - LilyGo T-Deck running Meshtastic firmware 2.7.x
-- The tbeam-tracker node transmitting on channel 0 with your private PSK
+- tbeam-tracker node transmitting on channel 0 with your private PSK
 - Both devices must use identical channel name (`TRACKER`) and PSK
 
 ---
@@ -39,7 +43,7 @@ git submodule update --init
 
 ---
 
-## Step 2 — Clone this repo
+## Step 2 — Clone your repo
 
 ```bash
 git clone https://github.com/Kels316/tbeam-tracker.git ~/Documents/tbeam-tracker
@@ -83,8 +87,7 @@ Save and close.
 
 ## Step 5 — Set your PSK
 
-The T-Deck needs the same channel config as the tracker node.
-Connect the T-Deck via USB and run:
+Connect the T-Deck via USB. Generate your base64 key:
 
 ```bash
 python3 -c "
@@ -99,7 +102,7 @@ print(base64.b64encode(key).decode())
 "
 ```
 
-Then apply to the T-Deck:
+Apply to the T-Deck:
 
 ```bash
 meshtastic --ch-index 0 --ch-set name TRACKER --ch-set psk base64:<your-key> --ch-set-enabled true
@@ -126,13 +129,13 @@ Open the serial monitor:
 pio device monitor --baud 115200
 ```
 
-When a tracker packet arrives you should see:
+When a packet arrives you should see:
 
 ```
-TrackerDisplayModule: position updated from node 0x???????? lat=... lon=... track=...
+TrackerDisplayModule: buoy fix lat=... lon=... track=...
 ```
 
-The two new pages will then appear in the T-Deck screen cycle.
+The two new pages will appear in the T-Deck screen cycle.
 
 ---
 
@@ -141,6 +144,7 @@ The two new pages will then appear in the T-Deck screen cycle.
 | Symptom | Fix |
 |---|---|
 | Pages don't appear | Check main.cpp edits match main_patch.cpp exactly |
-| "No data yet" on screen | Verify both devices use identical PSK and channel name |
+| "No buoy signal" on radar | Verify both devices use identical PSK and channel name |
+| Bearing/distance not shown | T-Deck needs a GPS fix — take it outside |
 | Build fails | Ensure both .h and .cpp are in `src/modules/` |
-| Old pages still show | Do a full erase flash: `pio run -e t-deck-tracker-display --target erase` then upload |
+| Stale data on screen | Check tbeam-tracker is powered and has GPS lock (TX LED flashing) |
