@@ -10,7 +10,7 @@
 | GPS broadcast | Every **30 seconds** via LoRa |
 | Compass heading | QMC5883L via I2C, packed into `ground_track` field |
 | Channel | Private, PSK baked into firmware |
-| Display | **Disabled** (no OLED driver loaded) |
+| Display | Disabled (no OLED driver loaded) |
 | Bluetooth | Disabled (saves ~60 KB flash) |
 | Power LED | GPIO 2 — on solid when running |
 | TX LED | GPIO 4 — flashes 200 ms on each packet |
@@ -18,100 +18,7 @@
 
 ---
 
-## 1. Prerequisites
-
-```bash
-# Python 3.8+ required
-pip install platformio
-
-# Clone the upstream Meshtastic firmware
-git clone https://github.com/meshtastic/firmware.git
-cd firmware
-git checkout master   # or pin to a release tag, e.g. v2.5.x
-```
-
----
-
-## 2. Copy custom files
-
-Copy this project's files into the cloned firmware repo:
-
-```bash
-# From inside the firmware/ directory:
-cp /path/to/meshtastic-tracker/src/modules/TrackerModule.h  src/modules/
-cp /path/to/meshtastic-tracker/src/modules/TrackerModule.cpp src/modules/
-cp /path/to/meshtastic-tracker/src/tracker_channel.h        src/
-```
-
----
-
-## 3. Patch main.cpp
-
-Open `src/main.cpp` in your editor.
-
-### 3a. Add includes (near the top, with other module includes):
-```cpp
-#include "modules/TrackerModule.h"
-#include "tracker_channel.h"
-```
-
-### 3b. Add setup calls inside `void setup()`, after `nodeDB.init()` and before `service.init()`:
-```cpp
-// --- Tracker customisation ---
-setupTrackerChannel();
-trackerModule = new TrackerModule();
-// --- end tracker customisation ---
-```
-
----
-
-## 4. Set your private PSK
-
-Open `src/tracker_channel.h` and replace `TRACKER_PSK` with your own 32-byte key:
-
-```bash
-# Generate a random key
-openssl rand -hex 32
-```
-
-Convert the output to `0x??` byte notation and paste into the array.
-**Every node that needs to receive these packets must be flashed with the same key.**
-
----
-
-## 5. Build
-
-Copy `platformio.ini` from this project into the firmware root (it extends the upstream tbeam env):
-
-```bash
-cp /path/to/meshtastic-tracker/platformio.ini .
-
-# Build
-pio run -e tbeam-tracker
-```
-
-Build output will be in `.pio/build/tbeam-tracker/firmware.bin`.
-
----
-
-## 6. Flash
-
-Connect your T-Beam via USB, then:
-
-```bash
-pio run -e tbeam-tracker --target upload
-```
-
-Or use the Meshtastic web flasher / esptool manually:
-
-```bash
-esptool.py --chip esp32 --port /dev/ttyUSB0 \
-  write_flash 0x10000 .pio/build/tbeam-tracker/firmware.bin
-```
-
----
-
-## 7. Hardware — Wiring
+## Hardware — Wiring
 
 ### M8Q-5883 module connections
 
@@ -124,9 +31,9 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 \
 | VCC | 3.3V | Power |
 | GND | GND | Ground |
 
-### LED wiring
+### Power and TX LEDs
 
-> GPIO 21 is now used for I2C SDA — power LED moved to GPIO 2.
+> GPIO 21 is used for I2C SDA — power LED is on GPIO 2, not GPIO 21.
 
 **Power LED (always on) — GPIO 2:**
 ```
@@ -140,9 +47,9 @@ GPIO 4 ──[220Ω]── LED anode (+)
                   LED cathode (–) ── GND
 ```
 
-Use standard 3mm or 5mm LEDs. 220Ω is correct for 3.3V logic.
-
 ### Recovery strobe circuit (GPIO 13)
+
+LED: Jaycar ZD0290 White 5mm Cree 45000mcd (Vf=3.2V, If=100mA)
 
 ```
 T-Beam 5V ── LED(+) ── LED(–) ──[56Ω]── 2N7000 Drain
@@ -155,26 +62,199 @@ The 10kΩ gate pulldown is important — without it the GPIO floats at boot and 
 
 ### Magnetic declination
 
-Open `TrackerModule.h` and set `MAG_DECLINATION` for your deployment location.
+Open `src/modules/TrackerModule.h` and set `MAG_DECLINATION` for your deployment location.
 Brisbane is pre-set to +11.5 degrees. Find your value at https://www.magnetic-declination.com
 
 ---
 
-## 8. Receiving the data
+## Step 1 — Install prerequisites
 
-Any standard Meshtastic node or app configured with the **same channel name + PSK** will decode the position packets. You can set this up via:
+Open Terminal on your Mac and run:
 
 ```bash
-meshtastic --ch-set name TRACKER --ch-set psk <your-key-base64> --ch-index 0
+# Install Homebrew if you don't have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install Python and PlatformIO
+brew install python
+pip3 install platformio
+
+# Install USB driver for the T-Beam's CP2102 chip
+brew install --cask silicon-labs-vcp-driver
 ```
 
-Or import the channel URL generated from the Meshtastic app.
+Reboot your Mac after installing the driver.
 
 ---
 
-## 9. Receiver node setup
+## Step 2 — Clone the Meshtastic firmware
 
-The receiver runs **stock Meshtastic firmware** — no custom build needed. It just needs the matching channel config.
+```bash
+cd ~/Documents
+git clone https://github.com/meshtastic/firmware.git
+cd firmware
+git submodule update --init
+```
+
+This downloads the official Meshtastic source code. The `git submodule update --init` pulls in all the libraries it depends on — it can take a few minutes.
+
+---
+
+## Step 3 — Clone your tracker repo
+
+```bash
+git clone https://github.com/Kels316/tbeam-tracker.git ~/Documents/tbeam-tracker
+```
+
+---
+
+## Step 4 — Copy your custom files into the firmware
+
+```bash
+cd ~/Documents/firmware
+
+cp ~/Documents/tbeam-tracker/src/modules/TrackerModule.h   src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/TrackerModule.cpp src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/StrobeModule.h    src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/StrobeModule.cpp  src/modules/
+cp ~/Documents/tbeam-tracker/src/tracker_channel.h         src/
+cp ~/Documents/tbeam-tracker/platformio.ini                .
+```
+
+---
+
+## Step 5 — Set your private PSK
+
+Open `src/tracker_channel.h` in a text editor:
+
+```bash
+open -e src/tracker_channel.h
+```
+
+Generate a random key:
+
+```bash
+openssl rand -hex 32
+```
+
+Convert the output into `0x??` byte pairs and replace the `TRACKER_PSK` array in the file. Every node that receives these packets must use the same key.
+
+---
+
+## Step 6 — Patch main.cpp
+
+Open the file:
+
+```bash
+open -e src/main.cpp
+```
+
+Find the block of `#include` lines near the top and add these three lines with them:
+
+```cpp
+#include "modules/TrackerModule.h"
+#include "modules/StrobeModule.h"
+#include "tracker_channel.h"
+```
+
+Then find `nodeDB.init();` inside `void setup()` and add these lines immediately after it:
+
+```cpp
+setupTrackerChannel();
+trackerModule = new TrackerModule();
+strobeModule  = new StrobeModule();
+```
+
+Save and close the file.
+
+---
+
+## Step 7 — Connect the T-Beam
+
+Plug the T-Beam into your Mac via USB, then check it is detected:
+
+```bash
+ls /dev/cu.*
+```
+
+You should see something like `/dev/cu.usbserial-0001` or `/dev/cu.SLAB_USBtoUART`. If nothing shows up, check your USB cable supports data (not charge-only) and that you rebooted after installing the driver in Step 1.
+
+---
+
+## Step 8 — Build and flash
+
+```bash
+cd ~/Documents/firmware
+pio run -e tbeam-tracker --target upload
+```
+
+PlatformIO will download all dependencies on the first run — this takes several minutes. Subsequent builds are much faster. When it finishes you should see:
+
+```
+SUCCESS
+```
+
+If the upload fails or times out, hold the small **BOOT** button on the T-Beam while the upload starts, then release it.
+
+---
+
+## Step 9 — Verify it is running
+
+Open the serial monitor:
+
+```bash
+pio device monitor --baud 115200
+```
+
+You should see output like:
+
+```
+TrackerModule: power LED GPIO 2, TX LED GPIO 4
+StrobeModule: recovery strobe on GPIO 13
+TrackerModule: QMC5883L compass online
+TrackerModule: no GPS lock, skipping send
+```
+
+The "no GPS lock" message is normal indoors. Take the T-Beam outside and within a few minutes you should see:
+
+```
+TrackerModule: heading 157.3 deg
+TrackerModule: packet sent (lat=..., lon=..., track=15730)
+```
+
+The strobe will also begin its 3-blink pattern once it has a lock.
+
+Press `Ctrl+C` to exit the serial monitor.
+
+---
+
+## Step 10 — Updating the firmware later
+
+When this repo is updated, pull the latest files and reflash:
+
+```bash
+# Pull latest from GitHub
+cd ~/Documents/tbeam-tracker
+git pull
+
+# Re-copy changed files into firmware
+cd ~/Documents/firmware
+cp ~/Documents/tbeam-tracker/src/modules/TrackerModule.h   src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/TrackerModule.cpp src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/StrobeModule.h    src/modules/
+cp ~/Documents/tbeam-tracker/src/modules/StrobeModule.cpp  src/modules/
+cp ~/Documents/tbeam-tracker/src/tracker_channel.h         src/
+cp ~/Documents/tbeam-tracker/platformio.ini                .
+
+# Rebuild and flash
+pio run -e tbeam-tracker --target upload
+```
+
+---
+
+## Receiver node setup
+
+The receiver runs stock Meshtastic firmware — no custom build needed. It just needs the matching channel config.
 
 ### What must match exactly
 
@@ -184,11 +264,11 @@ The receiver runs **stock Meshtastic firmware** — no custom build needed. It j
 | PSK | The 32 bytes set in `tracker_channel.h` |
 | Channel slot | 0 (primary) |
 
-### Step 1 — Convert your PSK to base64
+### Convert your PSK to base64
 
-Run this on your Mac, substituting your actual key bytes if you changed the defaults:
+Run this on your Mac, substituting your actual key bytes:
 
-```python
+```bash
 python3 -c "
 import base64
 key = bytes([
@@ -201,26 +281,23 @@ print(base64.b64encode(key).decode())
 "
 ```
 
-### Step 2a — Apply via Meshtastic CLI (receiver connected by USB)
+### Apply via Meshtastic CLI (receiver connected by USB)
 
 ```bash
 meshtastic --ch-index 0 --ch-set name TRACKER --ch-set psk base64:<your-base64-key> --ch-set-enabled true
 ```
 
-### Step 2b — Apply via phone app
+### Apply via phone app
 
-1. Open Meshtastic app → connect to receiver node
-2. Channel Config → Channel 0
+1. Open Meshtastic app and connect to the receiver node
+2. Go to Channel Config → Channel 0
 3. Set name to `TRACKER`
 4. Set PSK to the same key
 5. Save
 
-### What you'll see
+### What you will see
 
-Position packets from the tracker appear as a node on the map in the Meshtastic app, including GPS coordinates, altitude, satellite count, and compass heading (`ground_track` field). Any node or app on the same channel decodes them automatically — no extra software needed.
-
-> **Note:** If you changed the default PSK bytes in `tracker_channel.h` before building, use your updated bytes when generating the base64 string — not the placeholder defaults above.
-
+Position packets from the tracker appear as a node on the map in the Meshtastic app, including GPS coordinates, altitude, satellite count, and compass heading. Any node or app on the same channel decodes them automatically.
 
 ---
 
@@ -228,11 +305,13 @@ Position packets from the tracker appear as a node on the map in the Meshtastic 
 
 | Symptom | Fix |
 |---|---|
+| Port not found in Step 7 | Check USB cable supports data; reboot after driver install |
+| Upload fails / times out | Hold BOOT button on T-Beam while upload starts |
 | Power LED not on | Check wiring on GPIO 2; change `POWER_LED_PIN` in TrackerModule.h if needed |
+| TX LED not flashing | Check wiring on GPIO 4 |
 | Compass heading missing | Verify SDA/SCL wiring; check serial monitor for 'QMC5883L not found' |
-| TX LED not flashing | Check wiring on GPIO 4; verify `TX_LED_PIN` in TrackerModule.h |
-| "no GPS lock" in logs | Give the T-Beam a clear sky view; cold fix can take 2–5 min |
+| No GPS lock indoors | Normal — take it outside, cold fix takes 2–5 min |
 | Packets not received | Confirm both nodes use identical PSK bytes |
-| Build fails on TrackerModule | Ensure both .h and .cpp are in `src/modules/` |
-| Strobe not flashing | Check MOSFET wiring on GPIO 13; verify gate pulldown resistor is in place |
+| Build fails | Ensure all four .h/.cpp files are in `src/modules/` |
+| Strobe not flashing | Check MOSFET wiring on GPIO 13; verify gate pulldown resistor |
 | Strobe always on | Missing 10kΩ gate pulldown — GPIO floats high at boot without it |
