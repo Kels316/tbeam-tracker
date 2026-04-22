@@ -69,7 +69,10 @@ void TrackerDisplayModule::updateHistory(int32_t lat_i, int32_t lon_i,
                                           uint32_t rx_ms)
 {
     // Write new fix into ring buffer
-    history[histHead] = { lat_i, lon_i, rx_ms, true };
+    history[histHead].latitude_i  = lat_i;
+    history[histHead].longitude_i = lon_i;
+    history[histHead].rx_ms       = rx_ms;
+    history[histHead].valid       = true;
     histHead = (histHead + 1) % HISTORY_SIZE;
     if (histCount < HISTORY_SIZE) histCount++;
 
@@ -149,10 +152,10 @@ void TrackerDisplayModule::drawRadarPage(OLEDDisplay *display,
 
     bool ownFix = false;
     float ownLat = 0, ownLon = 0, ownHeading = 0;
-    if (gps && gps->hasLock()) {
-        ownLat     = gps->latitude  / 1e7f;
-        ownLon     = gps->longitude / 1e7f;
-        ownHeading = gps->heading   / 100.0f;
+    if (localPosition.latitude_i != 0 || localPosition.longitude_i != 0) {
+        ownLat     = localPosition.latitude_i   / 1e7f;
+        ownLon     = localPosition.longitude_i  / 1e7f;
+        ownHeading = localPosition.ground_track / 100.0f;
         ownFix     = true;
     }
 
