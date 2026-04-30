@@ -47,8 +47,10 @@ class TrackerModule : public SinglePortModule, private concurrency::OSThread
     static constexpr uint8_t TX_LED_PIN    = 4;
 
     // Timing
-    static constexpr uint32_t TX_LED_MS    = 200;
-    static constexpr uint32_t INTERVAL_MS  = 30000;
+    static constexpr uint32_t TX_LED_MS       = 200;
+    static constexpr uint32_t INTERVAL_MS     = 30000;
+    static constexpr uint32_t BOOT_DELAY_MS   = 15000; // wait for service->init() to settle
+    static constexpr uint32_t BOOT_POLL_MS    = 500;
 
     // Magnetic declination for your area (degrees, + east / - west)
     // Brisbane, AU ≈ +11.5°  — adjust for your deployment location
@@ -56,6 +58,9 @@ class TrackerModule : public SinglePortModule, private concurrency::OSThread
     static constexpr float MAG_DECLINATION = 11.5f;
 
     bool compassOk = false;
+    bool firstRun  = true;
+
+    void sendHello();
 };
 
 extern TrackerModule *trackerModule;

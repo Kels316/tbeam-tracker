@@ -1,0 +1,8 @@
+# Stale stub headers superseded by src/modules/
+nodes/heltec-v4/modules/
+
+# Map profile
+*.xml
+
+# macOS
+.DS_Store

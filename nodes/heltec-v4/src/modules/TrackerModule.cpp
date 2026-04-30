@@ -1,4 +1,4 @@
-#include "TrackerModule.h"
+#include "src/modules/TrackerModule.h"
 #include "GPS.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
+#include <string.h>
 
 TrackerModule *trackerModule;
 
@@ -61,8 +62,32 @@ TrackerModule::TrackerModule()
 
 int32_t TrackerModule::runOnce()
 {
+    if (firstRun) {
+        if (millis() < BOOT_DELAY_MS)
+            return BOOT_POLL_MS; // come back in 500ms — service not ready yet
+        firstRun = false;
+        sendHello();
+    }
     sendPosition();
     return INTERVAL_MS;
+}
+
+// ── Hello packet (boot announcement on channel 1) ────────────────────
+void TrackerModule::sendHello()
+{
+    static const char msg[] = "TRACKER ONLINE";
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) return;
+    p->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p->decoded.portnum       = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    p->decoded.payload.size  = strlen(msg);
+    memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
+    p->to       = NODENUM_BROADCAST;
+    p->channel  = 1;
+    p->want_ack = false;
+    service->sendToMesh(p, RX_SRC_LOCAL, true);
+    LOG_INFO("TrackerModule: sent hello on channel 1\n");
+    flashTxLed();
 }
 
 // ── QMC5883L heading read ────────────────────────────────────────────

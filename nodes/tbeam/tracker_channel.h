@@ -87,7 +87,7 @@ void setupTrackerChannel()
     // ── Telemetry — send battery level every 5 minutes ────────────
     moduleConfig.telemetry.device_update_interval  = 300;
     moduleConfig.telemetry.device_telemetry_enabled = true;
-    nodeDB->saveToDisk(SEGMENT_MODULE_CONFIG);
+    nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
 
     nodeDB->saveToDisk(SEGMENT_CONFIG);
     LOG_INFO("setupTrackerChannel: config saved\n");

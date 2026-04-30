@@ -1,4 +1,4 @@
-#include "StrobeModule.h"
+#include "src/modules/StrobeModule.h"
 #include <Arduino.h>
 
 StrobeModule *strobeModule;

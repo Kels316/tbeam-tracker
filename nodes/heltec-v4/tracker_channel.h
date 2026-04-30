@@ -50,24 +50,29 @@ void setupTrackerChannel()
     LOG_INFO("setupTrackerChannel: configuring TRACKER node (Heltec V4)\n");
 
     // ── Channel ────────────────────────────────────────────────────
-    meshtastic_ChannelSettings cs = meshtastic_ChannelSettings_init_default;
-    strncpy(cs.name, TRACKER_CHANNEL_NAME, sizeof(cs.name) - 1);
-    cs.psk.size = sizeof(TRACKER_PSK);
-    memcpy(cs.psk.bytes, TRACKER_PSK, sizeof(TRACKER_PSK));
+    // Bypass channels.setChannel() — it silently discards writes when
+    // channels_count < 2 (getByIndex returns a throwaway static buffer).
+    // Write directly to channelFile and save.
 
-    // Ensure channel 0 is PRIMARY
-    meshtastic_Channel ch0 = channels.getByIndex(0);
-    ch0.role  = meshtastic_Channel_Role_PRIMARY;
-    ch0.index = 0;
-    channels.setChannel(ch0);
+    // Ensure the array is large enough
+    if (channelFile.channels_count < 2)
+        channelFile.channels_count = 2;
 
-    // Set channel 1 as TRACKER (SECONDARY)
-    meshtastic_Channel ch = meshtastic_Channel_init_default;
-    ch.settings           = cs;
-    ch.role               = meshtastic_Channel_Role_SECONDARY;
-    ch.index              = 1;
-    channels.setChannel(ch);
-    channels.onConfigChanged(); // persist channels to flash
+    // Channel 0: keep existing settings, just force PRIMARY role
+    channelFile.channels[0].role  = meshtastic_Channel_Role_PRIMARY;
+    channelFile.channels[0].index = 0;
+
+    // Channel 1: TRACKER with our custom PSK
+    memset(&channelFile.channels[1], 0, sizeof(channelFile.channels[1]));
+    channelFile.channels[1].index = 1;
+    channelFile.channels[1].role  = meshtastic_Channel_Role_SECONDARY;
+    strncpy(channelFile.channels[1].settings.name, TRACKER_CHANNEL_NAME,
+            sizeof(channelFile.channels[1].settings.name) - 1);
+    channelFile.channels[1].settings.psk.size = sizeof(TRACKER_PSK);
+    memcpy(channelFile.channels[1].settings.psk.bytes, TRACKER_PSK, sizeof(TRACKER_PSK));
+
+    channels.onConfigChanged();
+    nodeDB->saveToDisk(SEGMENT_CHANNELS);
 
     // ── LoRa region + modem ────────────────────────────────────────
     config.lora.region       = meshtastic_Config_LoRaConfig_RegionCode_ANZ;
@@ -78,12 +83,12 @@ void setupTrackerChannel()
 
     // ── GPS ────────────────────────────────────────────────────────
     // Heltec V4 dedicated GNSS connector (SH1.25-8P):
-    //   GPIO 38 = GNSS_RX  (serial data into the ESP32-S3)
-    //   GPIO 39 = GNSS_TX  (serial data out to the GPS module)
+    //   GPS_RX_PIN = 39 — bits going TOWARDS the GPS (Meshtastic rx_gpio)
+    //   GPS_TX_PIN = 38 — bits going TOWARDS the CPU  (Meshtastic tx_gpio)
     // Note: GPIO 36 is VEXT_ENABLE — do not use for GPS.
     config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
-    config.position.rx_gpio  = 38;
-    config.position.tx_gpio  = 39;
+    config.position.rx_gpio  = 39; // GPS_RX_PIN: towards GPS
+    config.position.tx_gpio  = 38; // GPS_TX_PIN: towards CPU
     config.position.position_broadcast_secs = 3600; // our module handles 30s sends
 
     // ── Device ─────────────────────────────────────────────────────
@@ -97,7 +102,7 @@ void setupTrackerChannel()
     // ── Telemetry — send battery level every 5 minutes ────────────
     moduleConfig.telemetry.device_update_interval   = 300;
     moduleConfig.telemetry.device_telemetry_enabled = true;
-    nodeDB->saveToDisk(SEGMENT_MODULE_CONFIG);
+    nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
 
     nodeDB->saveToDisk(SEGMENT_CONFIG);
     LOG_INFO("setupTrackerChannel: config saved\n");
