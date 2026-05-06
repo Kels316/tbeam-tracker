@@ -111,17 +111,31 @@ The repeater uses the same PSK as the tracker and T-Deck on channel slot 1 (`TRA
 
 ## Firmware setup
 
+There are **two separate firmware directories** on disk. Do not mix them up.
+
+| Directory | Purpose | Boards |
+|---|---|---|
+| `~/Documents/firmware-2.7.15` | Patched Meshtastic 2.7.15 | T-Beam tracker, Heltec V4 tracker, Heltec V4 repeater |
+| `~/Documents/firmware` | Patched Meshtastic 2.7.15 (separate clone) | T-Deck receiver only |
+
+Both are patched copies of the same upstream release. They exist separately because the T-Deck build uses `env:t-deck-tft` (which pulls in LVGL and TFT drivers) and its build flags conflict with the tracker/repeater envs. Mixing them in the same `platformio.ini` causes build failures.
+
 ### Prerequisites
 
-1. Clone Meshtastic firmware 2.7.15:
+1. Clone Meshtastic firmware 2.7.15 **twice** — once for trackers, once for T-Deck:
    ```bash
    cd ~/Documents
+
+   # Tracker / repeater builds
    git clone --branch 2.7.15 https://github.com/meshtastic/firmware.git firmware-2.7.15
-   cd firmware-2.7.15
-   git submodule update --init --recursive
+   cd firmware-2.7.15 && git submodule update --init --recursive && cd ..
+
+   # T-Deck build
+   git clone --branch 2.7.15 https://github.com/meshtastic/firmware.git firmware
+   cd firmware && git submodule update --init --recursive && cd ..
    ```
 
-2. Clone this repo alongside it:
+2. Clone this repo alongside both:
    ```bash
    cd ~/Documents
    git clone https://github.com/Kels316/tbeam-tracker buoy-tracker
@@ -133,7 +147,7 @@ The repeater uses the same PSK as the tracker and T-Deck on channel slot 1 (`TRA
          ~/Documents/firmware-2.7.15/src/heltec_v4_tracker
    ```
 
-### Patch platformio.ini
+### Patch `firmware-2.7.15/platformio.ini` (trackers + repeater)
 
 Add the following sections to `~/Documents/firmware-2.7.15/platformio.ini`:
 
@@ -200,7 +214,7 @@ build_flags =
     -D MESHTASTIC_EXCLUDE_WEBSERVER=1
 ```
 
-### Patch main.cpp
+### Patch `firmware-2.7.15/src/main.cpp` (trackers + repeater)
 
 Add near the top of `~/Documents/firmware-2.7.15/src/main.cpp` (after the standard includes):
 
@@ -245,6 +259,83 @@ After `setupModules()`:
 #endif
 ```
 
+### Patch `firmware/platformio.ini` (T-Deck only)
+
+Add to `~/Documents/firmware/platformio.ini`:
+
+```ini
+[env:t-deck-tracker-display]
+extends = env:t-deck-tft
+build_src_filter = ${env:t-deck-tft.build_src_filter} -<modules/TrackerModule.cpp> +<../../buoy-tracker/receiver/tdeck/src/modules/TrackerDisplayModule.cpp>
+build_flags =
+    ${env:t-deck-tft.build_flags}
+    -DUSE_TRACKER_DISPLAY_MODULE=1
+    -I${PROJECT_DIR}/../buoy-tracker/receiver/tdeck/src
+```
+
+### Patch `firmware/src/graphics/tftSetup.cpp` (T-Deck only)
+
+After the existing `#include` block near the top of the file, add:
+
+```cpp
+#ifdef USE_TRACKER_DISPLAY_MODULE
+extern void trackerRunSetup();
+#endif
+```
+
+At the very start of `tft_task_handler()`, before the `while (true)` loop:
+
+```cpp
+#ifdef USE_TRACKER_DISPLAY_MODULE
+    trackerRunSetup();
+#endif
+```
+
+The function should look like this after patching:
+
+```cpp
+void tft_task_handler(void *param = nullptr)
+{
+#ifdef USE_TRACKER_DISPLAY_MODULE
+    trackerRunSetup();
+#endif
+    while (true) {
+        spiLock->lock();
+        deviceScreen->task_handler();
+        spiLock->unlock();
+        deviceScreen->sleep();
+    }
+}
+```
+
+### Patch `firmware/src/main.cpp` (T-Deck only)
+
+Add near the top of `~/Documents/firmware/src/main.cpp` (after the standard includes, e.g. after the `NodeDB.h` include):
+
+```cpp
+#ifdef USE_TRACKER_DISPLAY_MODULE
+#include "modules/TrackerDisplayModule.h"
+#endif
+```
+
+Inside `void setup()`, after `nodeDB = new NodeDB` and before the `#if HAS_TFT` block:
+
+```cpp
+#ifdef USE_TRACKER_DISPLAY_MODULE
+    // Force COLOR display mode so device-ui doesn't reboot to fix a mismatch.
+    config.display.displaymode = meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
+#endif
+```
+
+Inside `void setup()`, after `setupModules()`:
+
+```cpp
+#ifdef USE_TRACKER_DISPLAY_MODULE
+    trackerRadarModule = new TrackerRadarModule();
+    TrackerScreens::init();
+#endif
+```
+
 ---
 
 ## Building and flashing
@@ -274,8 +365,10 @@ cd ~/Documents/firmware-2.7.15
 
 ### T-Deck (receiver)
 
+**Use `firmware/`, not `firmware-2.7.15`** — the T-Deck env only exists there.
+
 ```bash
-cd ~/Documents/firmware-2.7.15
+cd ~/Documents/firmware
 ~/.local/bin/pio run -e t-deck-tracker-display --target upload --upload-port /dev/cu.usbmodemXXXXXX
 ```
 
@@ -341,7 +434,7 @@ The GPIO 35 LED blinks at the standard Meshtastic heartbeat rate as a secondary 
 cd ~/Documents/buoy-tracker && git pull
 ```
 
-Then rebuild and reflash. No file copying needed — the build pulls directly from `buoy-tracker/` via the symlink.
+Then rebuild and reflash. No file copying needed — `firmware-2.7.15` pulls from `buoy-tracker/` via the symlink, and `firmware` pulls from `buoy-tracker/receiver/tdeck/` via the relative path in `platformio.ini`.
 
 ---
 
@@ -361,4 +454,6 @@ Then rebuild and reflash. No file copying needed — the build pulls directly fr
 | Heltec V4 strobe not working | GPIO 13 is LORA_BUSY — do not use it |
 | Heltec V4 GPS not locking | Check GNSS connector orientation; `rx_gpio=39`, `tx_gpio=38` |
 | Battery shows `--` on T-Deck | Normal for first 5 min — telemetry interval is 300 s |
+| `Unknown environment names 't-deck-tracker-display'` | You're in `firmware-2.7.15` — that env lives in `firmware/`. Run `cd ~/Documents/firmware` first. |
+| `lv_conf.h not found` in tracker/repeater build | TrackerDisplayModule accidentally included — only belongs in `firmware/`, not `firmware-2.7.15` |
 | Repeater probing for GPS on first boot | Expected — GPS disable saves on that boot, gone after one reboot |
