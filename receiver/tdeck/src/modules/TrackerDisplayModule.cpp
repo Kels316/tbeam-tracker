@@ -11,122 +11,10 @@
 #include "lv_conf.h"
 #include "lvgl.h"
 
-#include <Wire.h>
-#include <Preferences.h>
-
 // ── Constants ─────────────────────────────────────────────────
 static constexpr float DEG2RAD   = M_PI / 180.0f;
 static constexpr float RAD2DEG   = 180.0f / M_PI;
 static constexpr float MPS_TO_KN = 1.94384f;
-
-// ── QMC5883P compass ──────────────────────────────────────────
-static constexpr uint8_t QMC_ADDR     = 0x2C;
-static constexpr uint8_t QMC_REG_DATA = 0x01;  // X LSB, 6 bytes follow
-static constexpr uint8_t QMC_REG_CR1  = 0x0A;  // mode / ODR / OSR
-static constexpr uint8_t QMC_REG_CR2  = 0x0B;  // range / set-reset
-static constexpr uint8_t QMC_REG_SIGN = 0x29;  // axis sign (undocumented, required)
-
-static float   s_compassHdg    = 0.0f;
-static float   s_compassRawHdg = 0.0f;   // atan2 result before north offset
-static float   s_northOffset   = 0.0f;   // set via trackball on Cal screen
-static bool    s_compassValid  = false;
-static bool    s_calReady      = false;   // true once range >= threshold on both axes
-static bool    s_calActive     = false;   // used by explicit Cal screen UI only
-
-// Hard-iron bounds — always reset to sentinels at boot so bias is captured fresh each session.
-// (axis polarity can vary each boot due to SIGN register uncertainty)
-static int16_t s_calXMin =  32767, s_calXMax = -32768;
-static int16_t s_calYMin =  32767, s_calYMax = -32768;
-
-static void *radarOrientBtn = nullptr;  // Orient button on radar screen
-static void *radarOrientLbl = nullptr;
-
-static void compassInit()
-{
-    // Wire already initialised by Meshtastic on SDA=18, SCL=8
-    // Init sequence per QMC5883P datasheet section 7.2 (continuous mode)
-    Wire.beginTransmission(QMC_ADDR);
-    Wire.write(QMC_REG_SIGN);
-    Wire.write(0x06);  // define sign for X/Y/Z axes
-    Wire.endTransmission();
-
-    Wire.beginTransmission(QMC_ADDR);
-    Wire.write(QMC_REG_CR2);
-    Wire.write(0x08);  // Set/Reset ON, 8 Gauss range
-    Wire.endTransmission();
-
-    Wire.beginTransmission(QMC_ADDR);
-    Wire.write(QMC_REG_CR1);
-    Wire.write(0xE3);  // continuous mode, ODR=100Hz, OSR1=8, OSR2=1
-    uint8_t err = Wire.endTransmission();
-    if (err == 0) {
-        s_compassValid = true;
-        LOG_INFO("TrackerScreens: QMC5883P ready at 0x2C\n");
-    } else {
-        LOG_WARN("TrackerScreens: QMC5883P not found (err=%u)\n", err);
-    }
-}
-
-// Read one raw sample from the magnetometer. Returns false on I2C error.
-static bool compassRawSample(int16_t &x, int16_t &y)
-{
-    Wire.beginTransmission(QMC_ADDR);
-    Wire.write(QMC_REG_DATA);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom((uint8_t)QMC_ADDR, (uint8_t)6) != 6) return false;
-    x = (int16_t)(Wire.read() | (Wire.read() << 8));
-    y = (int16_t)(Wire.read() | (Wire.read() << 8));
-    Wire.read(); Wire.read(); // discard Z
-    return true;
-}
-
-// Always-on: accumulates min/max every timer tick to self-calibrate bias during use.
-static void compassCalTick()
-{
-    if (!s_compassValid) return;
-    int16_t x, y;
-    if (!compassRawSample(x, y)) return;
-    if (x < s_calXMin) s_calXMin = x;
-    if (x > s_calXMax) s_calXMax = x;
-    if (y < s_calYMin) s_calYMin = y;
-    if (y > s_calYMax) s_calYMax = y;
-    int16_t rangeX = s_calXMax - s_calXMin;
-    int16_t rangeY = s_calYMax - s_calYMin;
-    s_calReady = (rangeX >= 300 && rangeY >= 300);
-}
-
-// Read heading from magnetometer and update s_compassHdg. Returns true if read succeeded.
-static bool compassCapture()
-{
-    if (!s_compassValid) {
-        LOG_WARN("compassCapture: sensor not valid\n");
-        return false;
-    }
-    int16_t x, y;
-    if (!compassRawSample(x, y)) {
-        LOG_WARN("compassCapture: I2C read failed\n");
-        return false;
-    }
-    // Use bias-centred values only once we have enough rotation to trust the min/max.
-    // Until then fall back to raw — heading will be wrong but will at least move.
-    float cx, cy;
-    if (s_calReady) {
-        cx = (float)x - (s_calXMax + s_calXMin) * 0.5f;
-        cy = (float)y - (s_calYMax + s_calYMin) * 0.5f;
-    } else {
-        cx = (float)x;
-        cy = (float)y;
-    }
-    float raw = atan2f(-cy, cx) * RAD2DEG;
-    while (raw < 0.0f)    raw += 360.0f;
-    while (raw >= 360.0f) raw -= 360.0f;
-    s_compassRawHdg = raw;
-    s_compassHdg    = raw;
-    LOG_INFO("compassCapture: rawX=%d rawY=%d cx=%.0f cy=%.0f hdg=%.1f calReady=%d rangeX=%d rangeY=%d\n",
-             x, y, cx, cy, raw, (int)s_calReady,
-             (int)(s_calXMax - s_calXMin), (int)(s_calYMax - s_calYMin));
-    return true;
-}
 
 // Canvas dimensions for the radar rose (fits left side of 320×240)
 static constexpr int CANVAS_W = 210;
@@ -151,14 +39,8 @@ TrackerScreens::Page  TrackerScreens::currentPage  = TrackerScreens::Page::None;
 bool                  TrackerScreens::hookDone     = false;
 void                 *TrackerScreens::mainScr      = nullptr;
 static lv_indev_read_cb_t  s_origEncReadCb          = nullptr;
-static lv_indev_t         *s_encIndev               = nullptr;
 void                 *TrackerScreens::radarScr     = nullptr;
 void                 *TrackerScreens::dataScr      = nullptr;
-void                 *TrackerScreens::calScr       = nullptr;
-static void          *calStatusLbl                 = nullptr;
-static void          *calActionBtn                 = nullptr;  // Recalibrate / Save
-static void          *calActionLbl                 = nullptr;  // label on that button
-static void          *calExitBtn                   = nullptr;  // Exit / Cancel
 void                 *TrackerScreens::radarCanvas  = nullptr;
 uint8_t              *TrackerScreens::radarBuf     = nullptr;
 void *TrackerScreens::lblLat   = nullptr;
@@ -456,20 +338,7 @@ void TrackerScreens::buildScreens()
     lv_obj_t *rs = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(rs, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(rs, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(rs, LV_OBJ_FLAG_SCROLLABLE);  // prevent trackball scrolling screen and shifting button positions
     radarScr = rs;
-
-    // Full-screen background tap zone — plain obj (not btn) so it never steals encoder focus
-    lv_obj_t *rb = lv_obj_create(rs);
-    lv_obj_set_pos(rb, 0, 0);
-    lv_obj_set_size(rb, 320, 240);
-    lv_obj_set_style_bg_opa(rb, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(rb, 0, 0);
-    lv_obj_add_flag(rb, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(rb, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(rb,
-        [](lv_event_t *e){ TrackerScreens::enterData(); },
-        LV_EVENT_CLICKED, NULL);
 
     // Canvas on left side
     lv_obj_t *cv = lv_canvas_create(rs);
@@ -485,33 +354,19 @@ void TrackerScreens::buildScreens()
     radarSpd   = makeLabel(rs, INFO_X,100, 100, 18, "Spd ---",  false);
     radarAge   = makeLabel(rs, INFO_X,122, 100, 18, "--",       false);
 
-    // Orient button — captures heading on tap, locks rose
-    lv_obj_t *ob = lv_btn_create(rs);
-    lv_obj_set_pos(ob, INFO_X, 148);
-    lv_obj_set_size(ob, 105, 50);
-    lv_obj_set_style_bg_color(ob, lv_color_hex(0x004488), 0);
-    lv_obj_set_style_radius(ob, 4, 0);
-    lv_obj_add_event_cb(ob, [](lv_event_t *) {
-        bool ok = compassCapture();
-        char buf[32];
-        // Show heading + raw values for diagnosis; remove rawX/rawY once working
-        snprintf(buf, sizeof(buf), ok ? "H%03.0f R%03.0f" : "FAIL %03.0f",
-                 s_compassHdg, s_compassRawHdg);
-        lv_label_set_text((lv_obj_t*)radarOrientLbl, buf);
-        lv_obj_set_style_bg_color((lv_obj_t*)radarOrientBtn,
-                                  ok ? lv_color_hex(0x005500) : lv_color_hex(0x880000), 0);
-        TrackerScreens::redrawRadar();
-    }, LV_EVENT_CLICKED, NULL);
-    radarOrientBtn = ob;
-    lv_obj_t *ol = lv_label_create(ob);
-    lv_label_set_text(ol, "Orient");
-    lv_obj_set_style_text_color(ol, lv_color_white(), 0);
-    lv_obj_center(ol);
-    radarOrientLbl = ol;
-
     // Hint label bottom-left
     lv_obj_t *hint = makeLabel(rs, 2, 225, 200, 14, "\xE2\x8C\x82 press trackball for Data", false);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x666666), 0);
+
+    // Invisible full-screen button to catch trackball press
+    lv_obj_t *rb = lv_btn_create(rs);
+    lv_obj_set_pos(rb, 0, 0);
+    lv_obj_set_size(rb, 320, 240);
+    lv_obj_set_style_bg_opa(rb, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(rb, 0, 0);
+    lv_obj_add_event_cb(rb,
+        [](lv_event_t *e){ TrackerScreens::enterData(); },
+        LV_EVENT_CLICKED, NULL);
 
     // ── Data screen ───────────────────────────────────────────
     lv_obj_t *ds = lv_obj_create(NULL);
@@ -544,7 +399,7 @@ void TrackerScreens::buildScreens()
     lv_obj_set_style_text_color((lv_obj_t*)lblAge, lv_color_hex(0x888888), 0);
 
     // Hint label
-    lv_obj_t *hint2 = makeLabel(ds, 2, 222, 230, 14, "\xE2\x8C\x82 press trackball for Cal", false);
+    lv_obj_t *hint2 = makeLabel(ds, 2, 222, 230, 14, "\xE2\x8C\x82 press trackball for Main", false);
     lv_obj_set_style_text_color(hint2, lv_color_hex(0x666666), 0);
 
     // Invisible full-screen button
@@ -554,111 +409,8 @@ void TrackerScreens::buildScreens()
     lv_obj_set_style_bg_opa(db, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(db, 0, 0);
     lv_obj_add_event_cb(db,
-        [](lv_event_t *e){ TrackerScreens::enterCal(); },
+        [](lv_event_t *e){ TrackerScreens::exitToMain(); },
         LV_EVENT_CLICKED, NULL);
-
-    // ── Cal screen ────────────────────────────────────────────
-    lv_obj_t *cs = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(cs, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(cs, LV_OPA_COVER, 0);
-    calScr = cs;
-
-    makeLabel(cs, 0, 4, 320, 20, "Compass Calibration", false);
-    lv_obj_t *cdiv = lv_obj_create(cs);
-    lv_obj_set_pos(cdiv, 0, 26);
-    lv_obj_set_size(cdiv, 320, 2);
-    lv_obj_set_style_bg_color(cdiv, lv_color_hex(0x444444), 0);
-    lv_obj_set_style_bg_opa(cdiv, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(cdiv, 0, 0);
-
-    // Status label — updated every second from onTimer
-    calStatusLbl = makeLabel(cs, 10, 36, 300, 40, "Checking cal...", false);
-    lv_obj_set_style_text_color((lv_obj_t*)calStatusLbl, lv_color_hex(0xFFAA00), 0);
-
-    // Instruction label (shown during active recal)
-    makeLabel(cs, 10, 82, 300, 50,
-        "Tilt and rotate in all directions.\nTrace a figure-8 in the air.", false);
-
-    // ── Buttons ───────────────────────────────────────────────
-    // Exit / Cancel button (left)
-    lv_obj_t *exitBtn = lv_btn_create(cs);
-    lv_obj_set_pos(exitBtn, 10, 135);
-    lv_obj_set_size(exitBtn, 135, 44);
-    lv_obj_set_style_bg_color(exitBtn, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_border_width(exitBtn, 0, 0);
-    lv_obj_set_style_radius(exitBtn, 6, 0);
-    lv_obj_t *exitLbl = lv_label_create(exitBtn);
-    lv_label_set_text(exitLbl, "Exit");
-    lv_obj_center(exitLbl);
-    lv_obj_add_event_cb(exitBtn, [](lv_event_t *) {
-        s_calActive = false;
-        lv_async_call([](void *){ TrackerScreens::exitToMain(); }, NULL);
-    }, LV_EVENT_CLICKED, NULL);
-    calExitBtn = exitBtn;
-
-    // Recalibrate / Save button (right)
-    lv_obj_t *actionBtn = lv_btn_create(cs);
-    lv_obj_set_pos(actionBtn, 175, 135);
-    lv_obj_set_size(actionBtn, 135, 44);
-    lv_obj_set_style_bg_color(actionBtn, lv_color_hex(0x005500), 0);
-    lv_obj_set_style_border_width(actionBtn, 0, 0);
-    lv_obj_set_style_radius(actionBtn, 6, 0);
-    lv_obj_t *actionLbl = lv_label_create(actionBtn);
-    lv_label_set_text(actionLbl, "Recalibrate");
-    lv_obj_center(actionLbl);
-    lv_obj_add_event_cb(actionBtn, [](lv_event_t *) {
-        if (!s_calActive) {
-            // Start new calibration
-            s_calXMin =  32767; s_calXMax = -32768;
-            s_calYMin =  32767; s_calYMax = -32768;
-            s_calReady  = false;
-            s_calActive = true;
-            LOG_INFO("TrackerScreens: starting new calibration\n");
-        } else if (s_calReady) {
-            // Save and exit
-            s_calActive = false;
-            Preferences prefs;
-            prefs.begin("tracker-cal", false);
-            prefs.putShort("calXMin",      s_calXMin);
-            prefs.putShort("calXMax",      s_calXMax);
-            prefs.putShort("calYMin",      s_calYMin);
-            prefs.putShort("calYMax",      s_calYMax);
-            prefs.putFloat("northOffset",  s_northOffset);
-            prefs.end();
-            LOG_INFO("TrackerScreens: cal saved xMin=%d xMax=%d yMin=%d yMax=%d\n",
-                     s_calXMin, s_calXMax, s_calYMin, s_calYMax);
-            lv_async_call([](void *){ TrackerScreens::exitToMain(); }, NULL);
-        }
-        // If active but not ready yet: ignore tap
-    }, LV_EVENT_CLICKED, NULL);
-    calActionBtn = actionBtn;
-    calActionLbl = actionLbl;
-
-    // Set North button — point device toward magnetic north, then press to lock offset
-    lv_obj_t *northBtn = lv_btn_create(cs);
-    lv_obj_set_pos(northBtn, 10, 185);
-    lv_obj_set_size(northBtn, 300, 32);
-    lv_obj_set_style_bg_color(northBtn, lv_color_hex(0x334400), 0);
-    lv_obj_set_style_border_width(northBtn, 0, 0);
-    lv_obj_set_style_radius(northBtn, 6, 0);
-    lv_obj_t *northLbl = lv_label_create(northBtn);
-    lv_label_set_text(northLbl, "Point to Magnetic North \xe2\x86\x92 Set North");
-    lv_obj_set_style_text_color(northLbl, lv_color_white(), 0);
-    lv_obj_center(northLbl);
-    lv_obj_add_event_cb(northBtn, [](lv_event_t *) {
-        if (!compassCapture()) return;          // get current raw heading
-        s_northOffset = -s_compassRawHdg;       // offset so this direction reads 0° (magnetic north)
-        while (s_northOffset < -180.0f) s_northOffset += 360.0f;
-        while (s_northOffset >  180.0f) s_northOffset -= 360.0f;
-        Preferences prefs;
-        prefs.begin("tracker-cal", false);
-        prefs.putFloat("northOffset", s_northOffset);
-        prefs.end();
-        LOG_INFO("TrackerScreens: north offset set to %.1f\n", s_northOffset);
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *hint3 = makeLabel(cs, 2, 222, 300, 14, "\xE2\x8C\x82 trackball: exit", false);
-    lv_obj_set_style_text_color(hint3, lv_color_hex(0x666666), 0);
 
     LOG_INFO("TrackerScreens: screens built\n");
 }
@@ -678,15 +430,6 @@ void TrackerScreens::enterData()
     currentPage = Page::Data;
     redrawData();
     lv_screen_load_anim((lv_obj_t*)dataScr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
-}
-
-void TrackerScreens::enterCal()
-{
-    // Just navigate to the Cal screen — do NOT reset cal data.
-    // A new calibration is only started when the user explicitly presses the trackball.
-    s_calActive = false;
-    currentPage = Page::Cal;
-    lv_screen_load_anim((lv_obj_t*)calScr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
 }
 
 void TrackerScreens::exitToMain()
@@ -715,7 +458,7 @@ void TrackerScreens::redrawRadar()
         ownHdg = localPosition.ground_track / 100.0f;
     }
 
-    float rotation = s_compassValid ? s_compassHdg : (ownFix ? ownHdg : 0.0f);
+    float rotation = ownFix ? ownHdg : 0.0f;
     drawCompassRose(&layer, ROSE_CX, ROSE_CY, ROSE_R, rotation);
     drawBoatIcon(&layer, ROSE_CX, ROSE_CY, 10);
 
@@ -777,18 +520,6 @@ void TrackerScreens::redrawRadar()
 void TrackerScreens::redrawData()
 {
     char buf[32];
-
-    // Buoy battery (populated from tracker telemetry packets)
-    if (g_tracker.valid && g_tracker.battery_pct > 0) {
-        if (g_tracker.battery_pct > 100)
-            snprintf(buf, sizeof(buf), "Bat USB/chg");
-        else
-            snprintf(buf, sizeof(buf), "Bat %u%%", (unsigned)g_tracker.battery_pct);
-    } else {
-        snprintf(buf, sizeof(buf), "Bat --");
-    }
-    lv_label_set_text((lv_obj_t*)lblHdg, buf);
-
     if (!g_tracker.valid) {
         lv_label_set_text((lv_obj_t*)lblLat, "No data yet");
         return;
@@ -806,7 +537,13 @@ void TrackerScreens::redrawData()
     if (g_tracker.motion_valid) snprintf(buf, sizeof(buf), "COG %03.0f\xC2\xB0T", g_tracker.cog_deg);
     else                        snprintf(buf, sizeof(buf), "COG ---");
     lv_label_set_text((lv_obj_t*)lblCog, buf);
-    // (lblHdg already updated above, before tracker data check)
+    if (g_tracker.battery_pct == 101)
+        snprintf(buf, sizeof(buf), "Bat USB");
+    else if (g_tracker.battery_pct > 0)
+        snprintf(buf, sizeof(buf), "Bat %u%%", (unsigned)g_tracker.battery_pct);
+    else
+        snprintf(buf, sizeof(buf), "Bat --");
+    lv_label_set_text((lv_obj_t*)lblHdg, buf);
     snprintf(buf, sizeof(buf), "Sats %u",  (unsigned)g_tracker.sats_in_view);
     lv_label_set_text((lv_obj_t*)lblSats, buf);
     snprintf(buf, sizeof(buf), "PDOP %.1f", g_tracker.PDOP / 100.0f);
@@ -828,24 +565,17 @@ void TrackerScreens::onTimer(void *timerV)
         lv_indev_t *indev = lv_indev_get_next(NULL);
         while (indev) {
             if (lv_indev_get_type(indev) == LV_INDEV_TYPE_ENCODER) {
-                s_encIndev      = indev;
                 s_origEncReadCb = lv_indev_get_read_cb(indev);
                 lv_indev_set_read_cb(indev, [](lv_indev_t *dev, lv_indev_data_t *data) {
                     if (s_origEncReadCb) s_origEncReadCb(dev, data);
-
                     if (data->key == LV_KEY_ENTER && data->state == LV_INDEV_STATE_PRESSED) {
                         data->state = LV_INDEV_STATE_RELEASED;
                         if (TrackerScreens::currentPage == TrackerScreens::Page::None)
                             lv_async_call([](void*){ TrackerScreens::enterRadar(); }, NULL);
                         else if (TrackerScreens::currentPage == TrackerScreens::Page::Radar)
                             lv_async_call([](void*){ TrackerScreens::enterData(); }, NULL);
-                        else if (TrackerScreens::currentPage == TrackerScreens::Page::Data)
-                            lv_async_call([](void*){ TrackerScreens::enterCal(); }, NULL);
-                        else {
-                            // Cal page: trackball always exits (buttons handle cal actions)
-                            s_calActive = false;
+                        else
                             lv_async_call([](void*){ TrackerScreens::exitToMain(); }, NULL);
-                        }
                     }
                 });
                 LOG_INFO("TrackerScreens: hooked encoder indev\n");
@@ -855,48 +585,8 @@ void TrackerScreens::onTimer(void *timerV)
             indev = lv_indev_get_next(indev);
         }
     }
-    // Fast path: read compass and redraw radar at 10 Hz for smooth rose rotation.
-    // Slow path (every 10 ticks = 1 s): update data/cal labels.
-    static uint8_t slowTick = 0;
-    compassCalTick(); // only does work when s_calActive is true
-    if (currentPage == Page::Radar) {
-        redrawRadar();
-    } else {
-        ++slowTick;
-        if (slowTick >= 10) {
-            slowTick = 0;
-            if (currentPage == Page::Data) {
-                redrawData();
-            } else if (currentPage == Page::Cal && calStatusLbl) {
-                char buf[64];
-                int16_t rX = s_calXMax - s_calXMin;
-                int16_t rY = s_calYMax - s_calYMin;
-                if (!s_calActive) {
-                    // Status view
-                    if (s_calReady)
-                        snprintf(buf, sizeof(buf), "Cal OK  rX=%d rY=%d", rX, rY);
-                    else
-                        snprintf(buf, sizeof(buf), "No calibration saved");
-                    if (calActionLbl) lv_label_set_text((lv_obj_t*)calActionLbl, "Recalibrate");
-                    if (calActionBtn) lv_obj_set_style_bg_color(
-                        (lv_obj_t*)calActionBtn, lv_color_hex(0x005500), 0);
-                } else if (!s_calReady) {
-                    // Active, not ready
-                    snprintf(buf, sizeof(buf), "Rotate...  rX=%d rY=%d", rX, rY);
-                    if (calActionLbl) lv_label_set_text((lv_obj_t*)calActionLbl, "Save");
-                    if (calActionBtn) lv_obj_set_style_bg_color(
-                        (lv_obj_t*)calActionBtn, lv_color_hex(0x333333), 0);  // grayed
-                } else {
-                    // Active, ready
-                    snprintf(buf, sizeof(buf), "READY  rX=%d rY=%d", rX, rY);
-                    if (calActionLbl) lv_label_set_text((lv_obj_t*)calActionLbl, "Save");
-                    if (calActionBtn) lv_obj_set_style_bg_color(
-                        (lv_obj_t*)calActionBtn, lv_color_hex(0x007700), 0);  // bright green
-                }
-                lv_label_set_text((lv_obj_t*)calStatusLbl, buf);
-            }
-        }
-    }
+    if (currentPage == Page::Radar) redrawRadar();
+    else if (currentPage == Page::Data)  redrawData();
 }
 
 // Called once at tft task startup — runs in correct LVGL context.
@@ -904,23 +594,8 @@ void TrackerScreens::onTimer(void *timerV)
 void trackerRunSetup()
 {
     LOG_INFO("TrackerScreens: trackerRunSetup\n");
-    Preferences prefs;
-    prefs.begin("tracker-cal", true);
-    // Cal bounds intentionally NOT loaded from Prefs — old stored values were bad.
-    // Using hardcoded seed (X centre ≈ -3000, Y centre ≈ +2400) from live measurements.
-    // s_calXMin/Max/YMin/Max are already initialised by the static declarations above.
-    s_northOffset = prefs.getFloat("northOffset", 0.0f);
-    prefs.end();
-    {
-        int16_t rX = s_calXMax - s_calXMin;
-        int16_t rY = s_calYMax - s_calYMin;
-        s_calReady = (rX >= 500 && rY >= 500);
-        LOG_INFO("TrackerScreens: loaded cal xMin=%d xMax=%d yMin=%d yMax=%d calReady=%d\n",
-                 s_calXMin, s_calXMax, s_calYMin, s_calYMax, (int)s_calReady);
-    }
-    compassInit();
     TrackerScreens::buildScreens();
-    lv_timer_create([](lv_timer_t *u){ TrackerScreens::onTimer(u); }, 100, NULL);
+    lv_timer_create([](lv_timer_t *u){ TrackerScreens::onTimer(u); }, 1000, NULL);
     LOG_INFO("TrackerScreens: screens ready\n");
 }
 
